@@ -26,10 +26,6 @@ HK Twist: Swap S&P/DJIA for HSI stocks (e.g., 0700.HK for Tencent) using yfinanc
 ML Upgrade: Add volume or volatility features; use time-series splits to prevent overfitting.*
 Tags:
 #PairsTrading #MachineLearning #QuantResearch #StatisticalArbitrage #Python #DataScience #Finance
-
-
-
-
 Code 2: Single-Pair Backtesting with Dual Strategy
 Purpose:
 Backtests a pairs trading strategy on one pair (e.g., AAPL-MSFT) with k-fold validation and performance metrics.
