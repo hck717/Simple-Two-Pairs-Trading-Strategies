@@ -1,0 +1,392 @@
+import pandas as pd
+import yfinance as yf
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import zscore
+import statsmodels.api as sm
+from statsmodels.tsa.stattools import coint
+from datetime import datetime, timedelta
+import pytz
+from sklearn.model_selection import TimeSeriesSplit  # For time-series aware k-fold
+
+# Constants
+START_DATE = '2000-01-01'
+END_DATE = '2025-02-22'
+RISK_FREE_RATE = 0.04  # Annual risk-free rate (e.g., 4%)
+ENTRY_THRESHOLD = 1.5
+EXIT_THRESHOLD = 0.75
+COMMISSION = 0.001  # 0.1% per trade
+SLIPPAGE = 0.0005  # 0.05% per trade
+K_FOLDS = 5  # Number of folds for cross-validation
+
+# User-configurable stock pair
+class StockPair:
+    def __init__(self, ticker1, ticker2):
+        self.ticker1 = ticker1
+        self.ticker2 = ticker2
+
+# Define the stock pair (e.g., AAPL and MSFT)
+stock_pair = StockPair('AAPL', 'MSFT')
+
+# 1. Stock Evaluation with Time Zone Adjustment
+def evaluate_stocks(stock_pair):
+    data1 = yf.download(stock_pair.ticker1, start=START_DATE, end=END_DATE, interval='1d')
+    data2 = yf.download(stock_pair.ticker2, start=START_DATE, end=END_DATE, interval='1d')
+
+    if data1.empty or data2.empty:
+        raise ValueError(f"Failed to fetch data for {stock_pair.ticker1} or {stock_pair.ticker2}.")
+
+    close_col1 = 'Close' if 'Close' in data1.columns else 'Adj Close'
+    close_col2 = 'Close' if 'Close' in data2.columns else 'Adj Close'
+    data1 = data1[[close_col1]].rename(columns={close_col1: 'Close'})
+    data2 = data2[[close_col2]].rename(columns={close_col2: 'Close'})
+
+    tz1 = 'America/New_York'  # Assuming both AAPL and MSFT are U.S.-based (NYSE/NASDAQ)
+    tz2 = 'America/New_York'
+
+    if tz1 != tz2:
+        tz1_obj = pytz.timezone(tz1)
+        tz2_obj = pytz.timezone(tz2)
+        data1.index = data1.index.tz_localize(tz1_obj)
+        data2.index = data2.index.tz_localize(tz2_obj)
+
+        hour_diff = (tz1_obj.utcoffset(datetime.now()) - tz2_obj.utcoffset(datetime.now())).total_seconds() / 3600
+        if 'Hong_Kong' in tz1 and 'America' in tz2:
+            data1.index = data1.index - timedelta(days=1)
+        elif 'America' in tz1 and 'Hong_Kong' in tz2:
+            data2.index = data2.index - timedelta(days=1)
+
+        data1.index = data1.index.tz_localize(None)
+        data2.index = data2.index.tz_localize(None)
+
+    data = pd.concat([data1['Close'], data2['Close']], axis=1).dropna()
+    data.columns = [f'{stock_pair.ticker1}_Close', f'{stock_pair.ticker2}_Close']
+
+    data[f'{stock_pair.ticker1}_Norm'] = data[f'{stock_pair.ticker1}_Close'] / data[f'{stock_pair.ticker1}_Close'].iloc[0]
+    data[f'{stock_pair.ticker2}_Norm'] = data[f'{stock_pair.ticker2}_Close'] / data[f'{stock_pair.ticker2}_Close'].iloc[0]
+
+    model = sm.OLS(data[f'{stock_pair.ticker1}_Norm'], sm.add_constant(data[f'{stock_pair.ticker2}_Norm'])).fit()
+    hedge_ratio = model.params[f'{stock_pair.ticker2}_Norm']
+    data['Spread'] = data[f'{stock_pair.ticker1}_Norm'] - hedge_ratio * data[f'{stock_pair.ticker2}_Norm']
+    data['Spread_Zscore'] = zscore(data['Spread'])
+
+    return data, hedge_ratio
+
+# 2. Cointegration Test (Simplified)
+def cointegration_test(data, stock_pair):
+    score, p_value, _ = coint(data[f'{stock_pair.ticker1}_Norm'], data[f'{stock_pair.ticker2}_Norm'])
+    print(f"Cointegration Test p-value: {p_value:.4f} ({'Cointegrated' if p_value < 0.05 else 'Not Cointegrated'})")
+
+# 3. Backtesting Strategy (Pairs Trading) with and without Transaction Costs
+def backtest_strategy(data, hedge_ratio, stock_pair):
+    signals = pd.Series(0, index=data.index)
+    position = 0
+
+    for i in range(1, len(data)):
+        z_score = data['Spread_Zscore'].iloc[i]
+        if z_score > ENTRY_THRESHOLD and position == 0:
+            signals.iloc[i] = -1  # Short ticker1, Long ticker2
+            position = -1
+        elif z_score < -ENTRY_THRESHOLD and position == 0:
+            signals.iloc[i] = 1   # Long ticker1, Short ticker2
+            position = 1
+        elif abs(z_score) < EXIT_THRESHOLD and position != 0:
+            signals.iloc[i] = 0
+            position = 0
+
+    returns1 = data[f'{stock_pair.ticker1}_Norm'].pct_change()
+    returns2 = data[f'{stock_pair.ticker2}_Norm'].pct_change()
+    gross_returns = signals.shift(1) * (returns1 - hedge_ratio * returns2)
+
+    # With transaction costs
+    trade_costs = signals.diff().abs() * (COMMISSION + SLIPPAGE)
+    net_returns = gross_returns - trade_costs.fillna(0)
+    cumulative_returns_net = (1 + net_returns.fillna(0)).cumprod()
+
+    # Without transaction costs
+    cumulative_returns_gross = (1 + gross_returns.fillna(0)).cumprod()
+
+    return signals, cumulative_returns_net, net_returns, cumulative_returns_gross, gross_returns
+
+# 4. Dual Strategy for Minute Data (Simplified)
+def backtest_dual_strategy(data, hedge_ratio, stock_pair):
+    entry_threshold = ENTRY_THRESHOLD
+    exit_threshold = EXIT_THRESHOLD
+    signals_ticker1 = pd.Series(0, index=data.index)
+    signals_ticker2 = pd.Series(0, index=data.index)
+    position_ticker1 = 0
+    position_ticker2 = 0
+
+    for i in range(1, len(data)):
+        z_score = data['Spread_Zscore'].iloc[i]
+        if z_score < -entry_threshold and position_ticker1 == 0:
+            signals_ticker1.iloc[i] = 1  # Long ticker1
+            position_ticker1 = 1
+        elif z_score > entry_threshold and position_ticker1 == 0:
+            signals_ticker1.iloc[i] = -1  # Short ticker1
+            position_ticker1 = -1
+        elif abs(z_score) < exit_threshold and position_ticker1 != 0:
+            signals_ticker1.iloc[i] = 0
+            position_ticker1 = 0
+
+        if z_score > entry_threshold and position_ticker2 == 0:
+            signals_ticker2.iloc[i] = 1  # Long ticker2
+            position_ticker2 = 1
+        elif z_score < -entry_threshold and position_ticker2 == 0:
+            signals_ticker2.iloc[i] = -1  # Short ticker2
+            position_ticker2 = -1
+        elif abs(z_score) < exit_threshold and position_ticker2 != 0:
+            signals_ticker2.iloc[i] = 0
+            position_ticker2 = 0
+
+    returns1 = data[f'{stock_pair.ticker1}_Norm'].pct_change()
+    returns2 = data[f'{stock_pair.ticker2}_Norm'].pct_change()
+    gross_returns = (signals_ticker1.shift(1) * returns1) + (signals_ticker2.shift(1) * returns2)
+
+    # With transaction costs
+    trade_costs = (signals_ticker1.diff().abs() + signals_ticker2.diff().abs()) * (COMMISSION + SLIPPAGE)
+    net_returns = gross_returns - trade_costs.fillna(0)
+    cumulative_returns_net = (1 + net_returns.fillna(0)).cumprod()
+
+    # Without transaction costs
+    cumulative_returns_gross = (1 + gross_returns.fillna(0)).cumprod()
+
+    return signals_ticker1, signals_ticker2, cumulative_returns_net, net_returns, cumulative_returns_gross, gross_returns
+
+# 5. Performance Analysis
+def performance_analysis(cumulative_returns_net, net_returns, cumulative_returns_gross, gross_returns, stock_pair, benchmark_data):
+    # Return Analysis (with and without transaction costs)
+    total_return_net = cumulative_returns_net.iloc[-1] - 1 if not cumulative_returns_net.empty else 0
+    annualized_return_net = (1 + total_return_net) ** (252 / len(cumulative_returns_net)) - 1 if len(cumulative_returns_net) > 0 else 0
+    total_return_gross = cumulative_returns_gross.iloc[-1] - 1 if not cumulative_returns_gross.empty else 0
+    annualized_return_gross = (1 + total_return_gross) ** (252 / len(cumulative_returns_gross)) - 1 if len(cumulative_returns_gross) > 0 else 0
+
+    print(f"\n=== Return Analysis ===")
+    print(f"With Transaction Costs - Total Return: {total_return_net:.2%}")
+    print(f"With Transaction Costs - Annualized Return: {annualized_return_net:.2%}")
+    print(f"Without Transaction Costs - Total Return: {total_return_gross:.2%}")
+    print(f"Without Transaction Costs - Annualized Return: {annualized_return_gross:.2%}")
+
+    # Risk/Reward Analysis (with and without transaction costs)
+    daily_returns_net = net_returns.dropna()
+    daily_returns_gross = gross_returns.dropna()
+    daily_rfr = (1 + RISK_FREE_RATE) ** (1 / 252) - 1  # Daily risk-free rate
+
+    # With transaction costs
+    excess_returns_net = daily_returns_net - daily_rfr
+    sharpe_ratio_net = excess_returns_net.mean() / excess_returns_net.std() * np.sqrt(252) if excess_returns_net.std() != 0 else 0
+
+    # Without transaction costs
+    excess_returns_gross = daily_returns_gross - daily_rfr
+    sharpe_ratio_gross = excess_returns_gross.mean() / excess_returns_gross.std() * np.sqrt(252) if excess_returns_gross.std() != 0 else 0
+
+    benchmark_returns = benchmark_data[f'{stock_pair.ticker2}_Norm'].pct_change().reindex(daily_returns_net.index, method='ffill')
+    info_ratio = (excess_returns_net - benchmark_returns).mean() / (excess_returns_net - benchmark_returns).std() * np.sqrt(252) if (excess_returns_net - benchmark_returns).std() != 0 else 0
+    max_drawdown = (cumulative_returns_net / cumulative_returns_net.cummax() - 1).min()
+    calmar_ratio = annualized_return_net / abs(max_drawdown) if max_drawdown != 0 else 0
+
+    print(f"\n=== Risk/Reward Analysis ===")
+    print(f"With Transaction Costs - Sharpe Ratio: {sharpe_ratio_net:.2f} (Good if > 2)")
+    print(f"Without Transaction Costs - Sharpe Ratio: {sharpe_ratio_gross:.2f} (Good if > 2)")
+    print(f"Information Ratio: {info_ratio:.2f}")
+    print(f"Calmar Ratio: {calmar_ratio:.2f}")
+
+    # Drawdown Analysis (using net returns)
+    drawdowns = cumulative_returns_net / cumulative_returns_net.cummax() - 1
+    max_drawdown_value = drawdowns.min()
+    drawdown_duration = (drawdowns < 0).astype(int).groupby(drawdowns.eq(0).cumsum()).cumsum().max() if not drawdowns.empty else 0
+
+    print(f"\n=== Drawdown Analysis ===")
+    print(f"Maximum Drawdown: {max_drawdown_value:.2%}")
+    print(f"Max Drawdown Duration: {drawdown_duration} days")
+
+    return drawdowns
+
+# 6. Simple Visualization (Using Net Returns with Transaction Costs)
+def visualize_results(data, signals, cumulative_returns_net, stock_pair, hedge_ratio, drawdowns):
+    plt.figure(figsize=(12, 12))
+
+    # Plot normalized prices and signals (using net returns signals)
+    plt.subplot(3, 1, 1)
+    plt.plot(data[f'{stock_pair.ticker1}_Norm'], label=f'{stock_pair.ticker1} Normalized', color='blue')
+    plt.plot(data[f'{stock_pair.ticker2}_Norm'], label=f'{stock_pair.ticker2} Normalized', color='orange')
+    plt.title('Normalized Stock Price Movement')
+    plt.ylabel('Normalized Price')
+    plt.legend()
+
+    # Plot spread and signals (using net returns signals)
+    plt.subplot(3, 1, 2)
+    plt.plot(data['Spread_Zscore'], label='Z-Score', color='orange', alpha=0.7)
+    plt.axhline(ENTRY_THRESHOLD, color='red', linestyle='--', label='Entry Threshold')
+    plt.axhline(-ENTRY_THRESHOLD, color='red', linestyle='--')
+    plt.axhline(EXIT_THRESHOLD, color='green', linestyle='--', label='Exit Threshold')
+    plt.axhline(-EXIT_THRESHOLD, color='green', linestyle='--')
+    plt.scatter(data.index[signals == 1], data['Spread_Zscore'][signals == 1], color='green', label=f'Long {stock_pair.ticker1}', marker='^', s=50)
+    plt.scatter(data.index[signals == -1], data['Spread_Zscore'][signals == -1], color='red', label=f'Short {stock_pair.ticker1}', marker='v', s=50)
+    plt.title('Daily Trading Signals')
+    plt.ylabel('Z-Score')
+    plt.legend()
+
+    # Plot cumulative returns (net) and drawdowns
+    plt.subplot(3, 1, 3)
+    plt.plot(cumulative_returns_net, label='Cumulative Returns (Net of Costs)', color='purple')
+    plt.plot(drawdowns, label='Drawdowns', color='red')
+    plt.title('Equity Curve and Drawdowns (Net of Costs)')
+    plt.ylabel('Value')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    # Simple minute data visualization (last day only, using net returns)
+    end_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    start_date = end_date - timedelta(days=1)
+    print(f"Fetching minute data from {start_date} to {end_date}")
+    minute_data1 = yf.download(stock_pair.ticker1, start=start_date, end=end_date, interval='1m')
+    minute_data2 = yf.download(stock_pair.ticker2, start=start_date, end=end_date, interval='1m')
+
+    if not minute_data1.empty and not minute_data2.empty:
+        if isinstance(minute_data1.columns, pd.MultiIndex):
+            close_col1 = ('Close', stock_pair.ticker1)
+        else:
+            close_col1 = 'Close' if 'Close' in minute_data1.columns else 'Adj Close'
+
+        if isinstance(minute_data2.columns, pd.MultiIndex):
+            close_col2 = ('Close', stock_pair.ticker2)
+        else:
+            close_col2 = 'Close' if 'Close' in minute_data2.columns else 'Adj Close'
+
+        tz1 = 'America/New_York'  # Assuming both AAPL and MSFT are U.S.-based
+        tz2 = 'America/New_York'
+        tz1_obj = pytz.timezone(tz1)
+        tz2_obj = pytz.timezone(tz2)
+
+        if minute_data1.index.tz is None:
+            minute_data1.index = minute_data1.index.tz_localize(tz1_obj).tz_convert('UTC')
+        else:
+            minute_data1.index = minute_data1.index.tz_convert('UTC')
+
+        if minute_data2.index.tz is None:
+            minute_data2.index = minute_data2.index.tz_localize(tz2_obj).tz_convert('UTC')
+        else:
+            minute_data2.index = minute_data2.index.tz_convert('UTC')
+
+        if close_col1 in minute_data1.columns and not minute_data1[close_col1].isna().all():
+            minute_data1[f'{stock_pair.ticker1}_Norm'] = minute_data1[close_col1] / minute_data1[close_col1].iloc[0]
+        else:
+            minute_data1[f'{stock_pair.ticker1}_Norm'] = pd.Series(index=minute_data1.index, dtype=float)
+
+        if close_col2 in minute_data2.columns and not minute_data2[close_col2].isna().all():
+            minute_data2[f'{stock_pair.ticker2}_Norm'] = minute_data2[close_col2] / minute_data2[close_col2].iloc[0]
+        else:
+            minute_data2[f'{stock_pair.ticker2}_Norm'] = pd.Series(index=minute_data2.index, dtype=float)
+
+        minute_data = pd.DataFrame(index=minute_data1.index)
+        minute_data[f'{stock_pair.ticker1}_Norm'] = minute_data1[f'{stock_pair.ticker1}_Norm']
+        minute_data[f'{stock_pair.ticker2}_Norm'] = minute_data2[f'{stock_pair.ticker2}_Norm'].reindex(minute_data1.index, method='ffill')
+        minute_data['Spread'] = minute_data[f'{stock_pair.ticker1}_Norm'] - hedge_ratio * minute_data[f'{stock_pair.ticker2}_Norm']
+        minute_data['Spread_Zscore'] = zscore(minute_data['Spread'].dropna())
+
+        signals_min_ticker1, signals_min_ticker2, cumulative_returns_min_net, net_returns_min, _, _ = backtest_dual_strategy(minute_data, hedge_ratio, stock_pair)
+
+        plt.figure(figsize=(12, 6))
+        plt.plot(minute_data['Spread_Zscore'], label='Z-Score', color='orange', alpha=0.7)
+        plt.axhline(ENTRY_THRESHOLD, color='red', linestyle='--', label='Entry Threshold')
+        plt.axhline(-ENTRY_THRESHOLD, color='red', linestyle='--')
+        plt.axhline(EXIT_THRESHOLD, color='green', linestyle='--', label='Exit Threshold')
+        plt.axhline(-EXIT_THRESHOLD, color='green', linestyle='--')
+        plt.scatter(minute_data.index[signals_min_ticker1 == 1], minute_data['Spread_Zscore'][signals_min_ticker1 == 1], color='green', label=f'Long {stock_pair.ticker1}', marker='^', s=50)
+        plt.scatter(minute_data.index[signals_min_ticker1 == -1], minute_data['Spread_Zscore'][signals_min_ticker1 == -1], color='red', label=f'Short {stock_pair.ticker1}', marker='v', s=50)
+        plt.scatter(minute_data.index[signals_min_ticker2 == 1], minute_data['Spread_Zscore'][signals_min_ticker2 == 1], color='lime', label=f'Long {stock_pair.ticker2}', marker='^', s=50)
+        plt.scatter(minute_data.index[signals_min_ticker2 == -1], minute_data['Spread_Zscore'][signals_min_ticker2 == -1], color='pink', label=f'Short {stock_pair.ticker2}', marker='v', s=50)
+        plt.title('Recent 1-Day Trading Signals (Minute Interval)')
+        plt.ylabel('Z-Score')
+        plt.legend()
+        plt.show()
+
+        # Simple performance for minute data (net of costs)
+        print(f"\n=== Minute Data Performance (Last Day, Net of Costs) ===")
+        total_return_min = cumulative_returns_min_net.iloc[-1] - 1 if not cumulative_returns_min_net.empty else 0
+        print(f"Total Return (Minute): {total_return_min:.2%}")
+
+    else:
+        print("Warning: Could not fetch valid minute data for recent 1-day signals.")
+
+# 7. K-Fold Cross-Validation
+def run_kfold_validation(data, hedge_ratio, stock_pair, k_folds=K_FOLDS):
+    tscv = TimeSeriesSplit(n_splits=k_folds)
+    fold_results = []
+
+    for fold, (train_index, test_index) in enumerate(tscv.split(data)):
+        print(f"\n=== Fold {fold + 1}/{k_folds} ===")
+        train_data = data.iloc[train_index]
+        test_data = data.iloc[test_index]
+
+        # Recalculate hedge ratio on training data
+        model = sm.OLS(train_data[f'{stock_pair.ticker1}_Norm'], 
+                      sm.add_constant(train_data[f'{stock_pair.ticker2}_Norm'])).fit()
+        fold_hedge_ratio = model.params[f'{stock_pair.ticker2}_Norm']
+        
+        # Update test data spread and z-score using the fold-specific hedge ratio
+        test_data['Spread'] = test_data[f'{stock_pair.ticker1}_Norm'] - fold_hedge_ratio * test_data[f'{stock_pair.ticker2}_Norm']
+        test_data['Spread_Zscore'] = zscore(test_data['Spread'])
+
+        # Backtest on test data
+        signals, cumulative_returns_net, net_returns, cumulative_returns_gross, gross_returns = backtest_strategy(
+            test_data, fold_hedge_ratio, stock_pair
+        )
+
+        # Performance analysis for the fold
+        drawdowns = performance_analysis(cumulative_returns_net, net_returns, cumulative_returns_gross, gross_returns, stock_pair, test_data)
+
+        # Store key metrics
+        total_return_net = cumulative_returns_net.iloc[-1] - 1 if not cumulative_returns_net.empty else 0
+        annualized_return_net = (1 + total_return_net) ** (252 / len(cumulative_returns_net)) - 1 if len(cumulative_returns_net) > 0 else 0
+        sharpe_ratio_net = (net_returns.mean() - ((1 + RISK_FREE_RATE) ** (1 / 252) - 1)) / net_returns.std() * np.sqrt(252) if net_returns.std() != 0 else 0
+        max_drawdown = (cumulative_returns_net / cumulative_returns_net.cummax() - 1).min()
+
+        fold_results.append({
+            'fold': fold + 1,
+            'total_return_net': total_return_net,
+            'annualized_return_net': annualized_return_net,
+            'sharpe_ratio_net': sharpe_ratio_net,
+            'max_drawdown': max_drawdown
+        })
+
+    # Summarize cross-validation results
+    summarize_kfold_results(fold_results)
+
+def summarize_kfold_results(fold_results):
+    print("\n=== K-Fold Cross-Validation Summary ===")
+    results_df = pd.DataFrame(fold_results)
+    
+    print(f"Average Total Return (Net): {results_df['total_return_net'].mean():.2%} (±{results_df['total_return_net'].std():.2%})")
+    print(f"Average Annualized Return (Net): {results_df['annualized_return_net'].mean():.2%} (±{results_df['annualized_return_net'].std():.2%})")
+    print(f"Average Sharpe Ratio (Net): {results_df['sharpe_ratio_net'].mean():.2f} (±{results_df['sharpe_ratio_net'].std():.2f})")
+    print(f"Average Max Drawdown: {results_df['max_drawdown'].mean():.2%} (±{results_df['max_drawdown'].std():.2%})")
+
+# Main Execution
+if __name__ == "__main__":
+    try:
+        # Evaluate stocks and get data
+        data, hedge_ratio = evaluate_stocks(stock_pair)
+
+        # Check cointegration
+        cointegration_test(data, stock_pair)
+
+        # Run k-fold cross-validation
+        run_kfold_validation(data, hedge_ratio, stock_pair, k_folds=K_FOLDS)
+
+        # Backtest the strategy with and without transaction costs
+        signals, cumulative_returns_net, net_returns, cumulative_returns_gross, gross_returns = backtest_strategy(data, hedge_ratio, stock_pair)
+
+        # Perform performance analysis
+        drawdowns = performance_analysis(cumulative_returns_net, net_returns, cumulative_returns_gross, gross_returns, stock_pair, data)
+
+        # Visualize results (using net returns with transaction costs)
+        visualize_results(data, signals, cumulative_returns_net, stock_pair, hedge_ratio, drawdowns)
+
+    except ValueError as e:
+        print(f"\nError: {e}")
+    except Exception as e:
+        print(f"\nUnexpected error: {e}")
