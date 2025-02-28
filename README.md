@@ -2,70 +2,56 @@
 
 Code 1: Multi-Pair Selection and ML-Based Pairs Trading
 Purpose:
-
-This script identifies tradable stock pairs from a pool of S&P 50 and 50 DJIA-like candidates, using statistical and machine learning (ML) methods to generate trading signals.
-
+Identifies tradable stock pairs from a pool of S&P 50 and 50 DJIA-like candidates, using stats and machine learning (ML) to generate signals.
+Great for practicing pair selection and ML—key quant skills in HK’s finance hub.
 Strategy:
-
-Pairs Selection: Combines 50 S&P stocks and 50 non-overlapping large-cap stocks, then evaluates all possible pairs (~4,950 combinations) for tradability.
-Statistical Metrics: Uses correlation, z-score of price spread, and cointegration (p-value) to score pairs.
-ML Signal Generation: Trains SVM and Random Forest classifiers to predict if a spread will converge (1) or diverge (0), generating entry/exit signals when z-scores exceed thresholds (e.g., |z| > 2 for entry, |z| < 0.5 for exit).
-Execution: Signals are based on ML consensus and z-score extremes, aiming to profit from mean reversion.
+Pairs Selection: Combines 50 S&P stocks and 50 non-overlapping large-cap stocks (~4,950 pairs).
+Statistical Metrics: Scores pairs using correlation, z-score of price spread, and cointegration p-value.
+ML Signal Generation: Trains SVM and Random Forest to predict spread convergence (1) or divergence (0).
+Execution: Signals trigger when z-score > 2 (entry) or < 0.5 (exit), aiming for mean reversion profits.
 Logic:
-
-Fetch historical price data (2010–2024) via yfinance.
+Fetch price data (2010–2024) via yfinance.
 Compute spread (ticker1/ticker2) and features:
-Z-score: Measures spread deviation from its rolling mean.
-Correlation: Assesses price co-movement.
-Cointegration: Tests long-term statistical relationship (p-value < 0.05 = cointegrated).
-Pairing score = correlation × (1 - p-value) × |z-score|—high scores indicate tradable pairs.
-Train ML models on features to predict spread direction, then apply signals to top pairs.
-Visualize results (heatmap, scatter, bar plots) for top 20 pairs.
+Z-score: Spread deviation from rolling mean.
+Correlation: Price co-movement strength.
+Cointegration: Long-term relationship (p-value < 0.05 = tradable).
+Pairing score = correlation × (1 - p-value) × |z-score|.
+Train ML models on features, apply signals to top pairs.
+Visualize top 20 pairs (heatmap, scatter, bar plots).
 Limitations & Reminder:
-
-Not Profitable in Real Life: Ignores transaction costs, slippage, and market impact. ML models overfit historical data, and naive thresholds (z > 2) lack robustness.
-Naive Version: Assumes constant relationships, no risk controls (e.g., stop-loss), and no HK-specific tuning (e.g., HSI stocks).
+Not Profitable in Real Life: No transaction costs, slippage, or risk controls; ML overfits historical data.
+Naive Version: Assumes static relationships, ignores HK-specific markets (e.g., HSI).
 Advice:
+HK Twist: Swap S&P/DJIA for HSI stocks (e.g., 0700.HK for Tencent) using yfinance with .HK suffixes.*
+ML Upgrade: Add volume or volatility features; use time-series splits to prevent overfitting.*
+Tags:
+#PairsTrading #MachineLearning #QuantResearch #StatisticalArbitrage #Python #DataScience #Finance
 
-Adapt for HK: Replace S&P/DJIA with HSI constituents (e.g., 0700.HK for Tencent). Use HKEX data via yfinance (e.g., '0700.HK').*
-Improve ML: Add features (e.g., volatility, volume) and use time-series cross-validation to avoid overfitting.*
-Tags: #PairsTrading #MachineLearning #QuantResearch #StatisticalArbitrage #Python #DataScience #Finance
+
+
 
 Code 2: Single-Pair Backtesting with Dual Strategy
 Purpose:
-
-This script backtests a pairs trading strategy on a single user-defined pair (e.g., AAPL-MSFT), evaluating performance with k-fold cross-validation and detailed metrics.
-
+Backtests a pairs trading strategy on one pair (e.g., AAPL-MSFT) with k-fold validation and performance metrics.
+Ideal for learning backtesting and risk analysis—skills HK banks like HSBC value.
 Strategy:
-
-Pairs Trading: Trades one pair based on spread mean reversion.
-Single Strategy: Long/short one stock vs. the other when z-score exceeds ±1.5, exits at ±0.75.
-Dual Strategy: Independently trades both stocks (long/short ticker1, long/short ticker2) based on the same z-score thresholds.
-Performance: Assesses returns (gross/net), Sharpe/Calmar ratios, and drawdowns, with/without transaction costs.
+Pairs Trading: Exploits spread mean reversion for one pair.
+Single Strategy: Long/short one stock vs. the other (z > ±1.5 entry, |z| < 0.75 exit).
+Dual Strategy: Trades both stocks independently based on z-score thresholds.
+Performance: Evaluates returns (gross/net), Sharpe/Calmar ratios, drawdowns.
 Logic:
-
-Fetch daily data (2000–2025) via yfinance, normalize prices, and compute spread (ticker1 - hedge_ratio × ticker2).
-Hedge ratio from OLS regression ensures spread stationarity.
-Z-score of spread triggers signals:
+Fetch daily data (2000–2025) via yfinance, normalize prices.
+Compute spread (ticker1 - hedge_ratio × ticker2) using OLS regression for hedge ratio.
+Z-score triggers:
 Single: Long ticker1/short ticker2 (z < -1.5), reverse (z > 1.5), exit (|z| < 0.75).
-Dual: Separate signals for each stock based on z-score.
-Backtest with costs (0.1% commission, 0.05% slippage) and k-fold validation (5 folds).
-Visualize normalized prices, signals, equity curve, and minute-level signals for the last day.
+Dual: Separate long/short signals for each stock.
+Backtest with costs (0.1% commission, 0.05% slippage) and 5-fold validation.
+Visualize prices, signals, equity curve, and minute-level signals (last day).
 Limitations & Reminder:
-
-Not Profitable in Real Life: Static thresholds (1.5, 0.75) and fixed hedge ratio ignore dynamic market conditions. Costs erode profits, and no risk management (e.g., position sizing) is included.
-Naive Version: Assumes perfect execution, no latency, and U.S.-centric (AAPL-MSFT) without HK relevance.
+Not Profitable in Real Life: Fixed thresholds and hedge ratio miss market dynamics; costs kill profits.
+Naive Version: No risk limits, U.S.-focused (AAPL-MSFT), not tuned for HK markets.
 Advice:
-
-HK Focus: Test HK pairs (e.g., 0700.HK vs. 0005.HK [HSBC]) and adjust thresholds via optimization (e.g., grid search).*
-Enhance Realism: Add dynamic hedge ratios (rolling OLS) and risk limits (e.g., max 5% drawdown).*
-Tags: #PairsTrading #Backtesting #Cointegration #QuantStrategy #Python #RiskManagement #Finance
-
-General Comments & Preparation Tie-In
-Why Useful for You: Both scripts align with Junior Quant Analyst skills—data handling (Pandas), modeling (statsmodels), ML (Scikit-learn), and finance (pairs trading). They’re portfolio-worthy for HK recruiters (e.g., HSBC, HKEX).
-Next Steps:
-Modify Code 1 to screen HSI pairs and Code 2 to backtest them.
-Add to your GitHub (as in my prior plan) with READMEs explaining logic and HK context.
-Study “Quantitative Trading” by Ernest Chan (HKU library) for pairs trading theory.
-Real-World Caution: These are educational toys—real quant roles at HK hedge funds (e.g., Citadel) demand more complexity (e.g., high-frequency data, robust risk models).
-Let me know if you want help adapting these for HSI stocks or refining them further!
+HK Relevance: Test HK pairs (e.g., 0700.HK vs. 0005.HK [HSBC]); optimize thresholds with grid search.*
+Realism Boost: Use rolling hedge ratios and cap drawdowns (e.g., 5% max loss).*
+Tags:
+#PairsTrading #Backtesting #Cointegration #QuantStrategy #Python #RiskManagement #Finance
