@@ -1,0 +1,226 @@
+#Time Complexity: O(P^2 * (D + P^2 log(P^2))), where:
+
+#P is the size of the stock_pool (number of stocks).
+
+#D is the number of days between the start and end dates.
+
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from statsmodels.tsa.stattools import coint
+import itertools
+from tqdm import tqdm
+import warnings
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+warnings.filterwarnings("ignore")
+
+# Step 1: Fetch S&P 50 and 50 non-overlapping DJIA candidates, combine into one pool
+def get_sp50_djia_candidates_combined(limit_sp=50, limit_djia=50):
+    sp50 = [
+        'AAPL', 'MSFT', 'NVDA', 'AMZN', 'META', 'GOOGL', 'BRK-B', 'TSLA', 'JPM', 'WMT',
+        'UNH', 'XOM', 'V', 'PG', 'MA', 'JNJ', 'HD', 'COST', 'ABBV', 'CVX',
+        'MRK', 'KO', 'PEP', 'BAC', 'ADBE', 'CSCO', 'NFLX', 'DIS', 'TMO', 'ACN',
+        'MCD', 'IBM', 'GE', 'CAT', 'UPS', 'PM', 'NKE', 'AMD', 'QCOM', 'GS',
+        'SPGI', 'CMCSA', 'TXN', 'INTC', 'LOW', 'UNP', 'HON', 'ORCL', 'LMT', 'T'
+    ][:limit_sp]
+
+    # 50 large-cap U.S. companies (DJIA-like candidates) not in sp50
+    djia_candidates = [
+        'MMM', 'AXP', 'AMGN', 'BA', 'DOW', 'CRM', 'TRV', 'VZ', 'WBA', 'PFE',
+        'LLY', 'ABT', 'MDT', 'BMY', 'GILD', 'MO', 'SO', 'DUK', 'AEP', 'EXC',
+        'SPG', 'PLD', 'O', 'WELL', 'CCI', 'PSA', 'AVGO', 'NOW', 'ADSK', 'SNPS',
+        'CDNS', 'ROP', 'APH', 'ANSS', 'KLAC', 'MCHP', 'ADI', 'ON', 'TEL', 'ECL',
+        'SHW', 'ZTS', 'SYK', 'REGN', 'VRTX', 'ISRG', 'BDX', 'EW', 'DXCM', 'IDXX'
+    ]
+
+    # Ensure no overlap with sp50
+    djia_candidates = [ticker for ticker in djia_candidates if ticker not in sp50][:limit_djia]
+    combined = sp50 + djia_candidates
+    print(f"Total unique stocks in pool: {len(combined)} (S&P 50: {len(sp50)}, DJIA candidates: {len(djia_candidates)})")
+    return combined
+
+# Step 2: Fetch price data and compute spread dynamics with flexible dates
+def fetch_pair_data(ticker1, ticker2, start_date, end_date):
+    try:
+        stock1 = yf.download(ticker1, start=start_date, end=end_date, progress=False)
+        stock2 = yf.download(ticker2, start=start_date, end=end_date, progress=False)
+        price_col = 'Adj Close' if 'Adj Close' in stock1.columns else 'Close'
+        data = pd.concat([stock1[price_col], stock2[price_col]], axis=1).dropna()
+        data.columns = [ticker1, ticker2]
+        spread = data[ticker1] / data[ticker2]
+        return data, spread
+    except Exception as e:
+        print(f"Error fetching pair {ticker1}-{ticker2}: {e}")
+        return None, None
+
+# Step 3: Compute features, pairing score, and labels using lagged data
+def compute_features_and_labels(df, spread, window=20, look_ahead=5):
+    if df is None or len(df) < window + look_ahead:
+        return {'z_score': np.nan, 'correlation': np.nan, 'coint_pvalue': np.nan, 'pairing_score': np.nan}, np.nan
+
+    spread_mean = spread.rolling(window=window).mean()
+    spread_std = spread.rolling(window=window).std()
+    z_score = (spread - spread_mean) / spread_std
+    z_score_latest = z_score.iloc[-look_ahead - 1] if not pd.isna(z_score.iloc[-look_ahead - 1]) else np.nan
+
+    correlation = df.iloc[:, 0].rolling(window=window).corr(df.iloc[:, 1])
+    correlation_latest = correlation.iloc[-look_ahead - 1] if not pd.isna(correlation.iloc[-look_ahead - 1]) else np.nan
+
+    try:
+        _, p_value, _ = coint(df.iloc[:, 0], df.iloc[:, 1])
+    except Exception as e:
+        print(f"Cointegration error for pair: {e}")
+        p_value = np.nan
+
+    if not (pd.isna(correlation_latest) or pd.isna(p_value) or pd.isna(z_score_latest)):
+        pairing_score = (correlation_latest * (1 - p_value) * abs(z_score_latest))
+    else:
+        pairing_score = np.nan
+
+    current_spread = spread.iloc[-look_ahead - 1]
+    future_spread = spread.iloc[-1]
+    label = 1 if future_spread < current_spread else 0 if not pd.isna(future_spread) else np.nan
+
+    return {
+        'z_score': z_score_latest,
+        'correlation': correlation_latest,
+        'coint_pvalue': p_value,
+        'pairing_score': pairing_score
+    }, label
+
+# Step 4: Process pairs, classify, and generate signals
+def process_pairs(stock_pool, start_date, end_date):
+    results = []
+    features_list = []
+    labels_list = []
+    pairs = list(itertools.combinations(stock_pool, 2))
+
+    for ticker1, ticker2 in tqdm(pairs, desc="Processing pairs"):
+        df, spread = fetch_pair_data(ticker1, ticker2, start_date, end_date)
+        features, label = compute_features_and_labels(df, spread)
+        pair_result = {
+            'pair': f"{ticker1}-{ticker2}",
+            'correlation': features['correlation'],
+            'z_score': features['z_score'],
+            'coint_pvalue': features['coint_pvalue'],
+            'pairing_score': features['pairing_score']
+        }
+        results.append(pair_result)
+        if not pd.isna(label):
+            features_list.append([features['z_score'], features['correlation'], features['coint_pvalue']])
+            labels_list.append(label)
+
+    results_df = pd.DataFrame(results).dropna(subset=['pairing_score']).sort_values('pairing_score', ascending=False)
+
+    if features_list and labels_list:
+        X = np.array(features_list)
+        y = np.array(labels_list)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+        svm = SVC(kernel='rbf', gamma=0.1, C=1.0)
+        svm.fit(X_train, y_train)
+        svm_pred = svm.predict(X_test)
+        print(f"SVM Accuracy: {accuracy_score(y_test, svm_pred):.2f}")
+
+        rf = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+        rf.fit(X_train, y_train)
+        rf_pred = rf.predict(X_test)
+        print(f"RF Accuracy: {accuracy_score(y_test, rf_pred):.2f}")
+
+        all_features = results_df[['z_score', 'correlation', 'coint_pvalue']].values
+        results_df['svm_pred'] = svm.predict(all_features)
+        results_df['rf_pred'] = rf.predict(all_features)
+
+        results_df['entry_signal'] = np.where((results_df['z_score'].abs() > 2) &
+                                              (results_df['svm_pred'] == results_df['rf_pred']),
+                                              results_df['svm_pred'], np.nan)
+        results_df['exit_signal'] = np.where((results_df['z_score'].abs() < 0.5) &
+                                             (results_df['entry_signal'].notna()),
+                                             1 - results_df['entry_signal'], np.nan)
+    else:
+        print("No valid labels for training. Adding default predictions.")
+        results_df['svm_pred'] = np.nan
+        results_df['rf_pred'] = np.nan
+        results_df['entry_signal'] = np.nan
+        results_df['exit_signal'] = np.nan
+
+    return results_df
+
+# Step 5: Visualizations
+def visualize_results(df, num_pairs=20):
+    if df.empty:
+        print("Error: No valid data to visualize.")
+        return
+
+    df_subset = df.head(min(num_pairs, len(df)))
+
+    plt.figure(figsize=(16, 10))
+    available_cols = [col for col in ['correlation', 'z_score', 'coint_pvalue', 'pairing_score', 'svm_pred', 'rf_pred']
+                      if col in df_subset.columns]
+    heatmap_data = df_subset.set_index('pair')[available_cols]
+    if 'z_score' in heatmap_data.columns and not heatmap_data['z_score'].isna().all():
+        heatmap_data['z_score'] = (heatmap_data['z_score'] - heatmap_data['z_score'].mean()) / heatmap_data['z_score'].std()
+    sns.heatmap(heatmap_data, annot=True, cmap="RdYlGn", fmt=".2f", linewidths=.5, cbar_kws={'label': 'Value'})
+    plt.title(f"Heatmap of Top {len(df_subset)} Pairs by Pairing Score")
+    plt.xlabel("Features and Predictions")
+    plt.ylabel("Pairs")
+    plt.tight_layout()
+    plt.show()
+
+    plt.figure(figsize=(12, 8))
+    if 'svm_pred' in df_subset.columns and not df_subset['svm_pred'].isna().all():
+        scatter = plt.scatter(df_subset['z_score'], df_subset['correlation'], c=df_subset['svm_pred'],
+                              cmap='coolwarm', s=100, alpha=0.7)
+        plt.colorbar(scatter, label='SVM Prediction (1=Converge, 0=Diverge)')
+    else:
+        scatter = plt.scatter(df_subset['z_score'], df_subset['correlation'], c='grey', s=100, alpha=0.7)
+        plt.text(0.5, 0.5, "No SVM Predictions Available", transform=plt.gca().transAxes, ha='center')
+    for i, pair in enumerate(df_subset['pair']):
+        plt.annotate(pair, (df_subset['z_score'].iloc[i], df_subset['correlation'].iloc[i]), fontsize=8)
+    plt.xlabel("Z-score")
+    plt.ylabel("Correlation")
+    plt.title(f"Scatter Plot of Top {len(df_subset)} Pairs")
+    plt.grid(True)
+    plt.show()
+
+    top_10 = df_subset.head(10)
+    plt.figure(figsize=(12, 6))
+    if 'entry_signal' in top_10.columns and not top_10['entry_signal'].isna().all():
+        sns.barplot(x='pairing_score', y='pair', hue='entry_signal', dodge=False, data=top_10, palette='muted')
+        plt.legend(title='Entry Signal (1=Converge, 0=Diverge)', loc='best')
+    else:
+        sns.barplot(x='pairing_score', y='pair', data=top_10, color='grey')
+    plt.title("Top 10 Pairs by Pairing Score")
+    plt.xlabel("Pairing Score")
+    plt.ylabel("Pairs")
+    plt.tight_layout()
+    plt.show()
+
+# Step 6: Execute with flexible backtesting dates
+if __name__ == "__main__":
+    start_date = "2010-01-01"
+    end_date = "2024-12-31"
+
+    stock_pool = get_sp50_djia_candidates_combined(limit_sp=50, limit_djia=50)
+    results_df = process_pairs(stock_pool, start_date, end_date)
+
+    print(f"Backtesting period: {start_date} to {end_date}")
+    print("Head of the Dataset (Top 5 Pairs by Pairing Score):")
+    if not results_df.empty:
+        print(results_df.head())
+    else:
+        print("No valid pairs found.")
+
+    visualize_results(results_df, num_pairs=20)
+
+    if not results_df.empty:
+        results_df.to_csv("pair_trading_dataset.csv", index=False)
+        print("Dataset saved to 'pair_trading_dataset.csv'")
+    else:
+        print("No data to save.")
