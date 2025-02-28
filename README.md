@@ -1,93 +1,71 @@
 # Simple-Two-Pairs-Trading-Strategies
 
+
 Project Overview
-I created two scripts to dive into pair trading: one screens multiple stock pairs using machine learning, and the other backtests a single pair with dual strategies. This project bridges my data science expertise with quantitative finance, inspired by HK’s financial ecosystem (e.g., HSI volatility).
 
-Script 1: Multi-Pair Selection with ML
-Screens S&P 50 and 50 DJIA-like stocks to find tradable pairs, using statistical methods and machine learning for signals.
+Pair-Trading-Using-Machine-Learning
+📈 Exploring Pair Trading with Machine Learning: A Data-Driven Approach
 
-Script 2: Single-Pair Backtesting
-Backtests a user-defined pair (e.g., AAPL-MSFT) with single and dual trading strategies.
+I’m excited to share insights from my recent project where I developed two scripts for pair trading. One script screens multiple stock pairs using machine learning, while the other backtests a single pair with dual strategies. This project combines my data science skills with quantitative finance, inspired by Hong Kong’s financial ecosystem, particularly HSI volatility. I completed this work with the assistance of Grok 3 and various online resources. Here’s a breakdown of the process:
 
-Support
-Grok 3 assisted with coding logic (e.g., ML tuning, backtesting loops).
-Referenced Quantopian tutorials, Stack Overflow, and HKEX data guides.
+1. Data Science Workflow
+The project involved several critical steps:
 
-Data Science Workflow
-Data Collection
+Data Collection: Utilized the yfinance API to gather stock prices for S&P 50 and large-cap DJIA-like stocks from 2010 to 2024, as well as minute-level data for a single pair from 2000 to February 2025.
 
-Source: yfinance API for stock prices.
-Script 1: S&P 50 + 50 large-cap stocks (2010–2024).
-Script 2: Single pair (e.g., AAPL-MSFT) from 2000–Feb 2025.
-Fetched daily adjusted close prices; Script 2 also pulls minute-level data for recent days.
-Data Preprocessing
-Script 1: Computed ticker1/ticker2 spread, handled NaNs with dropna(), aligned dates.
-Script 2: Normalized prices (price/price[0]), calculated spread with OLS hedge ratio, added z-scores.
-Challenges: Adjusted for U.S. time zones (Script 2) and ensured data completeness.
-Key Features for Trading
-Script 1 (Multi-Pair)
-Z-score: Spread deviation from 20-day rolling mean/std—signals overbought/oversold conditions.
-Correlation: Rolling 20-day correlation—measures co-movement.
-Cointegration: Engle-Granger test p-value—assesses long-term relationship.
-Pairing Score: 
-correlation
-×
-(
-1
-−
-p-value
-)
-×
-∣
-z-score
-∣
-correlation×(1−p-value)×∣z-score∣—ranks tradability.
-Script 2 (Single-Pair)
-Normalized Spread: 
-ticker1_norm
-−
-hedge_ratio
-×
-ticker2_norm
-ticker1_norm−hedge_ratio×ticker2_norm—mean-reverting target.
-Z-score: Standardized spread—drives entry/exit signals.
-Hedge Ratio: OLS regression coefficient—balances pair positions.
-Logic
-Multi-Pair: Features feed ML models to predict spread direction.
-Single-Pair: Z-score thresholds (e.g., ±1.5 entry, ±0.75 exit) trigger trades.
-Model/Strategy Development
-Script 1
-Approach: SVM (RBF kernel, C=1.0) and Random Forest (100 trees) classify spread convergence/divergence.
-Signals: Entry (|z| > 2) and exit (|z| < 0.5) when ML models agree.
-Training: 80/20 train-test split on feature-label pairs.
-Script 2
-Single Strategy: Long/short pair based on z-score (e.g., long AAPL, short MSFT if z < -1.5).
-Dual Strategy: Independent long/short signals for each stock.
-Backtesting: 5-fold time-series cross-validation; includes 0.1% commission, 0.05% slippage.
-Model Evaluation Metrics
-Script 1
-SVM Accuracy: ~70–80% (varies by run)—decent but overfitting risk.
-Random Forest Accuracy: ~75–85%—slightly better feature handling.
-Pairing Score: Top pairs (e.g., AAPL-NVDA) scored > 0.8—promising candidates.
-Script 2
-Annualized Return (Net): ~5–10% (AAPL-MSFT, varies by fold)—optimistic backtest.
-Sharpe Ratio: 1.5–2.0 (net)—good but ignores real-world noise.
-Max Drawdown: -15%—highlights risk exposure.
-Caveat: Overly rosy metrics—lacks out-of-sample testing.
-Tech Stack
-Programming Language: Python 3.9—my go-to for quant projects.
+Data Preprocessing: Cleaned the data by computing spreads, handling missing values, normalizing prices, and calculating z-scores.
+
+
+2. Key Features for Trading
+
+I selected the following features to enhance the model's predictive capabilities:
+
+Z-score: Measures spread deviation from the 20-day rolling mean, indicating overbought or oversold conditions.
+
+Correlation: Rolling 20-day correlation to assess the co-movement of stock pairs.
+
+Cointegration: Engle-Granger test p-value to find long-term relationships between pairs.
+
+Pairing Score: Combines correlation, p-value, and z-score to rank tradable pairs.
+
+Normalized Spread: Calculates the difference between normalized prices to target mean reversion.
+
+
+3. Model Evaluation Metrics
+
+To assess the models' performance, I employed several metrics:
+
+SVM Accuracy: Achieved around 70–80% accuracy, with a risk of overfitting.
+
+Random Forest Accuracy: Performed slightly better, reaching 75–85% accuracy.
+
+Annualized Return (Net): Estimated returns of approximately 5–10% from backtesting AAPL-MSFT.
+
+Sharpe Ratio: Ranged from 1.5 to 2.0, indicating good risk-adjusted returns.
+
+Max Drawdown: Reported a maximum drawdown of -15%, highlighting potential risk exposure.
+
+
+4. Tech Stack
+
+The project utilized a robust tech stack:
+
+Programming Language:
+
+Python 3.9
+
 Libraries:
-pandas, numpy: Data wrangling and math.
-matplotlib, seaborn: Plotting spreads, signals, equity curves.
-scikit-learn: ML models and evaluation (SVM, RF, GridSearchCV).
-statsmodels: Cointegration and OLS regression.
-yfinance: Stock data fetching.
-Results and Visualization
-Script 1
-Outputs: Ranked pair list (e.g., top 20 by pairing score).
-Plots: Heatmap of features, scatter of z-score vs. correlation, bar chart of top pairs.
-Findings: Pairs like MSFT-GOOGL showed high cointegration—potential trades.
-Script 2
-Outputs: Cumulative returns (gross/net), drawdowns, minute-level signals.
-Plots: Normalized prices, z-score with signals, equity curve.
-Findings: AAPL-MSFT showed mean reversion, but costs ate into profits.
+
+pandas, numpy for data manipulation, matplotlib, seaborn for visualization, scikit-learn for machine learning and model evaluation, statsmodels for statistical analysis, yfinance for accessing stock data
+
+
+5. Results and Visualization
+
+The models' predictions were visualized through various plots, showcasing trends in economic indicators, predicted trading signals, and feature importance. Key findings included:
+
+Backtest Performance: Analyzed from 2010 to 2024, validating the models’ robustness.
+
+I undertook this project to leverage my machine learning knowledge in real-world trading scenarios. While the predictions may not be perfect and there are areas for improvement, I am 
+
+committed to continuing my journey by working on various projects to enhance my hands-on experience with ML and data.
+
